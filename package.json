@@ -1,0 +1,20 @@
+{
+  "name": "github-contribution-merge",
+  "version": "1.0.0",
+  "description": "Display contributions from multiple GitHub accounts on your profile page",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "keywords": [
+    "github",
+    "contributions",
+    "cloudflare-worker"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "wrangler": "^4.46.0"
+  }
+}

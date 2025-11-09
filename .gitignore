@@ -1,0 +1,8 @@
+.env
+.dev.vars
+.wrangler
+node_modules/
+hack/
+
+# ;)
+CLAUDE.md
