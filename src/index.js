@@ -5,6 +5,9 @@ const GITHUB_API = "https://api.github.com/graphql";
 
 /**
  * Verify if a user has authorized the primary user to merge and display their contributions
+ * Authorization is verified by checking for a gist with filename pattern:
+ * github-contribution-merge-allow-{primaryUser}.md
+ *
  * @param {string} additionalUser - The user to check authorization for
  * @param {string} primaryUser - The primary user requesting access
  * @param {string} githubToken - GitHub API token
@@ -35,32 +38,14 @@ async function verifyUserAuthorization(
 
     const gists = await response.json();
 
-    // Find the auth gist
-    const authGist = gists.find(
-      (g) => g.files && g.files["github-contribution-auth.json"],
-    );
+    // Check for auth gist with filename pattern: github-contribution-merge-allow-{primaryUser}.md
+    const authFilename = `github-contribution-merge-allow-${primaryUser}.md`;
+    const authGist = gists.find((g) => g.files && g.files[authFilename]);
 
     if (!authGist) {
-      console.warn(`No auth gist found for ${additionalUser}`);
-      return false;
-    }
-
-    // Fetch the gist content
-    const gistFile = authGist.files["github-contribution-auth.json"];
-    const gistContentUrl = gistFile.raw_url;
-
-    const contentResponse = await fetch(gistContentUrl);
-    if (!contentResponse.ok) {
-      console.warn(`Failed to fetch gist content for ${additionalUser}`);
-      return false;
-    }
-
-    const content = await contentResponse.text();
-    const authData = JSON.parse(content);
-
-    // Verify the primary user is allowed
-    if (authData.allow !== primaryUser) {
-      console.warn(`User ${additionalUser} has not authorized ${primaryUser}`);
+      console.warn(
+        `No auth gist found for ${additionalUser} (expected filename: ${authFilename})`,
+      );
       return false;
     }
 
@@ -570,22 +555,26 @@ export default {
           .filter((u) => u && u !== primaryUser); // Remove empty strings and dedupe primary user
       }
 
-      // Verify authorization for each additional user
+      // Verify authorization for each additional user (in parallel)
       const authorizedUsers = [primaryUser]; // Always include primary user
 
-      for (const additionalUser of additionalUsers) {
-        const isAuthorized = await verifyUserAuthorization(
+      const authorizationPromises = additionalUsers.map((additionalUser) =>
+        verifyUserAuthorization(
           additionalUser,
           primaryUser,
           env.GITHUB_TOKEN,
-        );
+        ).then((isAuthorized) => ({ user: additionalUser, isAuthorized })),
+      );
 
+      const authResults = await Promise.all(authorizationPromises);
+
+      authResults.forEach(({ user, isAuthorized }) => {
         if (isAuthorized) {
-          authorizedUsers.push(additionalUser);
+          authorizedUsers.push(user);
         } else {
-          console.warn(`Skipping unauthorized user: ${additionalUser}`);
+          console.warn(`Skipping unauthorized user: ${user}`);
         }
-      }
+      });
 
       if (authorizedUsers.length === 0) {
         return new Response("Error: No authorized users to display", {
@@ -606,7 +595,7 @@ export default {
       ];
       if (!validThemes.includes(themeParam)) {
         return new Response(
-          `Error: Invalid theme parameter. Valid options: ${validThemes.join(", ")}`,
+          `Error: Invalid theme parameter. Valid options: \n- ${validThemes.join("\n- ")}`,
           {
             status: 400,
             headers: { "Content-Type": "text/plain" },
@@ -643,34 +632,45 @@ export default {
         years = [currentYear];
       }
 
-      // Fetch data for all authorized users and years
-      const yearData = [];
-
-      for (const year of years) {
+      // Fetch data for all authorized users and years (in parallel)
+      const yearPromises = years.map(async (year) => {
         const dataPromises = authorizedUsers.map((u) =>
           fetchContributions(u, year, env.GITHUB_TOKEN),
         );
         const dataArray = await Promise.all(dataPromises);
         const merged = mergeContributions(dataArray, authorizedUsers);
-        yearData.push({ year, calendar: merged });
-      }
+        return { year, calendar: merged };
+      });
+
+      const yearData = await Promise.all(yearPromises);
 
       // Generate SVG
       const svg = generateSVGVertical(yearData, authorizedUsers, themeParam);
 
+      // Optimized caching strategy for GitHub Camo proxy:
+      // - s-maxage=300 (5 min): Short CDN/proxy cache to keep Camo responsive
+      // - max-age=300 (5 min): Browser cache duration
+      // - stale-while-revalidate=86400 (24h): Serve stale content while fetching fresh
+      // - stale-if-error=604800 (7d): Serve stale if origin is down
+      // This ensures Camo can serve cached content immediately while background refresh happens
       return new Response(svg, {
         headers: {
           "Content-Type": "image/svg+xml",
-          "Cache-Control": "public, max-age=3600", // Cache for 1 hour
+          "Cache-Control":
+            "public, max-age=300, s-maxage=300, stale-while-revalidate=86400, stale-if-error=604800",
           "Access-Control-Allow-Origin": "*",
+          ETag: `W/"${Date.now()}"`, // Weak ETag for conditional requests
         },
       });
     } catch (error) {
       console.error("Error:", error);
-      return new Response(`Error: ${error.message}`, {
-        status: 500,
-        headers: { "Content-Type": "text/plain" },
-      });
+      return new Response(
+        "An error occurred while generating the contribution graph",
+        {
+          status: 500,
+          headers: { "Content-Type": "text/plain" },
+        },
+      );
     }
   },
 };
